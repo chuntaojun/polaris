@@ -39,15 +39,13 @@ for arch in ${arch_list[@]}; do
     fi
 
     mv polaris-server polaris-server-${arch}
-    platforms+="linux/${arch},"
+    platforms="linux/${arch},"
+
+    extra_tags=""
+    pre_release=`echo ${docker_tag}|egrep "(alpha|beta|rc|[T|t]est)"|wc -l`
+    if [ ${pre_release} == 0 ]; then
+      extra_tags="-t ${docker_repository}/polaris-server:latest"
+    fi
+
+    docker buildx build --network=host -t ${docker_repository}/polaris-server:${docker_tag} ${extra_tags} --platform ${platforms} --push ./
 done
-
-platforms=${platforms::-1}
-extra_tags=""
-
-pre_release=`echo ${docker_tag}|egrep "(alpha|beta|rc|[T|t]est)"|wc -l`
-if [ ${pre_release} == 0 ]; then
-  extra_tags="-t ${docker_repository}/polaris-server:latest"
-fi
-
-docker buildx build --network=host -t ${docker_repository}/polaris-server:${docker_tag} ${extra_tags} --platform ${platforms} --push ./
