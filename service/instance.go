@@ -1003,7 +1003,6 @@ func (s *Server) createServiceIfAbsent(
 	svcId := resp.GetService().GetId().GetValue()
 	return svcId, nil
 }
-
 func (s *Server) loadService(namespace string, svcName string) (*model.Service, *apiservice.Response) {
 	svc := s.caches.Service().GetServiceByName(svcName, namespace)
 	if svc != nil {
