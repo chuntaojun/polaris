@@ -389,7 +389,6 @@ func ParseQueryParams(req *restful.Request) map[string]string {
 			queryParams[key] = value[0] // 暂时默认只支持一个查询
 		}
 	}
-
 	return queryParams
 }
 

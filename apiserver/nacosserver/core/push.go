@@ -15,12 +15,38 @@
  * specific language governing permissions and limitations under the License.
  */
 
-package base
+package core
 
 import (
-	commonlog "github.com/polarismesh/polaris/common/log"
+	nacosmodel "github.com/polarismesh/polaris/apiserver/nacosserver/model"
+	"github.com/polarismesh/polaris/common/model"
 )
 
-var (
-	nacoslog = commonlog.GetScopeOrDefaultByName("nacos-apiserver")
-)
+type PushCenter interface {
+	AddSubscriber(s Subscriber)
+	RemoveSubscriber(s Subscriber)
+	EnablePush(s Subscriber) bool
+	Push(d *PushData)
+}
+
+type PushData struct {
+	Service     *model.Service
+	ServiceInfo *nacosmodel.ServiceInfo
+}
+
+type Subscriber struct {
+	AddrStr     string
+	Agent       string
+	App         string
+	Ip          string
+	Port        int
+	NamespaceId string
+	ServiceName string
+	Cluster     string
+	Type        string
+}
+
+type PushCenterDelegate struct {
+	udpPush  PushCenter
+	grpcPush PushCenter
+}

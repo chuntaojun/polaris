@@ -15,32 +15,24 @@
  * specific language governing permissions and limitations under the License.
  */
 
-package base
+package model
 
-import (
-	commonlog "github.com/polarismesh/polaris/common/log"
-	"github.com/polarismesh/polaris/common/model"
-)
-
-type InitOption func(svr *BaseGrpcServer)
-
-// WithModule set bz module
-func WithModule(bz model.BzModule) InitOption {
-	return func(svr *BaseGrpcServer) {
-		svr.bz = bz
-	}
+type NacosApiError struct {
+	DetailErrCode int32
+	ErrAbstract   string
+	Err           *NacosError
 }
 
-// WithProtocol
-func WithProtocol(protocol string) InitOption {
-	return func(svr *BaseGrpcServer) {
-		svr.protocol = protocol
-	}
+func (e *NacosApiError) Error() string {
+	return ""
 }
 
-// WithLogger
-func WithLogger(log *commonlog.Scope) InitOption {
-	return func(svr *BaseGrpcServer) {
-		svr.log = log
-	}
+type NacosError struct {
+	ErrCode  int32
+	ErrMsg   string
+	CauseErr error
+}
+
+func (e *NacosError) Error() string {
+	return ""
 }

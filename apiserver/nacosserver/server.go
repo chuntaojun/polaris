@@ -27,20 +27,9 @@ const (
 	ProtooclName = "nacos"
 )
 
-type Server interface {
-	// Initialize API初始化逻辑
-	Initialize(ctx context.Context, basePort uint32, option map[string]interface{}) error
-	// Serve 开始运行服务
-	Serve(errCh chan error)
-	// Stop 停止API端口监听
-	Stop()
-}
-
 type NacosServer struct {
 	listenIP   string
 	listenPort uint32
-
-	servers []Server
 }
 
 // GetProtocol API协议名
@@ -55,11 +44,7 @@ func (n *NacosServer) GetPort() uint32 {
 
 // Initialize API初始化逻辑
 func (n *NacosServer) Initialize(ctx context.Context, option map[string]interface{}, api map[string]apiserver.APIConfig) error {
-	for i := range n.servers {
-		if err := n.servers[i].Initialize(ctx, n.GetPort(), option); err != nil {
-			return err
-		}
-	}
+
 	return nil
 }
 
