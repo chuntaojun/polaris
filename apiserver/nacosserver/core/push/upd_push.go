@@ -65,7 +65,24 @@ func (p *UdpPushCenter) EnablePush(s core.Subscriber) bool {
 }
 
 func (p *UdpPushCenter) Push(d *core.PushData) {
+	namespace := d.Service.Namespace
+	service := d.Service.Name
 
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	if _, ok := p.connectors[namespace]; !ok {
+		return
+	}
+	if _, ok := p.connectors[namespace][service]; !ok {
+		return
+	}
+
+	for _, conn := range p.connectors[namespace][service] {
+		// step 1: 数据序列化为 json
+		// step 2: 按需进行数据压缩
+		conn.send(nil)
+	}
 }
 
 func NewConnector(s core.Subscriber) *Connector {
@@ -91,6 +108,10 @@ func (c *Connector) connect() error {
 	}
 	c.conn = conn
 	return nil
+}
+
+func (c *Connector) send(data []byte) {
+
 }
 
 func (c *Connector) IsAlive() bool {
