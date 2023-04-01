@@ -39,10 +39,28 @@ import (
 	"github.com/polarismesh/polaris/common/metrics"
 	"github.com/polarismesh/polaris/common/secure"
 	"github.com/polarismesh/polaris/common/utils"
+	"github.com/polarismesh/polaris/namespace"
 	"github.com/polarismesh/polaris/plugin"
 	"github.com/polarismesh/polaris/service"
 	"github.com/polarismesh/polaris/service/healthcheck"
 )
+
+func NewNacosV1Server(
+	pushCenter core.PushCenter,
+	store *core.NacosDataStorage,
+	options ...option,
+) *NacosV1Server {
+	svr := &NacosV1Server{
+		pushCenter: pushCenter,
+		store:      store,
+	}
+
+	for i := range options {
+		options[i](svr)
+	}
+
+	return svr
+}
 
 // NacosV1Server HTTP API服务器
 type NacosV1Server struct {
@@ -53,85 +71,47 @@ type NacosV1Server struct {
 	option          map[string]interface{}
 	openAPI         map[string]apiserver.APIConfig
 	start           bool
-	restart         bool
 	exitCh          chan struct{}
 
-	enablePprof   bool
-	enableSwagger bool
+	server    *http.Server
+	rateLimit plugin.Ratelimit
+	whitelist plugin.Whitelist
 
-	server     *http.Server
-	rateLimit  plugin.Ratelimit
-	whitelist  plugin.Whitelist
-	authServer auth.AuthServer
+	pushCenter core.PushCenter
+	store      *core.NacosDataStorage
 
-	pushCenter  core.PushCenter
-	healthSvr   *healthcheck.Server
-	discoverSvr service.DiscoverServer
-	store       *core.NacosDataStorage
-}
-
-const (
-	// Discover discover string
-	Discover string = "Discover"
-)
-
-// GetPort 获取端口
-func (h *NacosV1Server) GetPort() uint32 {
-	return h.listenPort
+	authSvr      auth.AuthServer
+	namespaceSvr namespace.NamespaceOperateServer
+	discoverSvr  service.DiscoverServer
+	healthSvr    *healthcheck.Server
 }
 
 // GetProtocol 获取Server的协议
 func (h *NacosV1Server) GetProtocol() string {
-	return "http"
+	return "nacos-http"
 }
 
 // Initialize 初始化HTTP API服务器
-func (h *NacosV1Server) Initialize(_ context.Context, option map[string]interface{},
-	apiConf map[string]apiserver.APIConfig) error {
+func (h *NacosV1Server) Initialize(_ context.Context, option map[string]interface{}, port uint32,
+	apiConf map[string]apiserver.APIConfig) {
 	h.option = option
 	h.openAPI = apiConf
 	h.listenIP = option["listenIP"].(string)
-	h.listenPort = uint32(option["listenPort"].(int))
-	h.enablePprof, _ = option["enablePprof"].(bool)
-	h.enableSwagger, _ = option["enableSwagger"].(bool)
-	// 连接数限制的配置
-	if raw, _ := option["connLimit"].(map[interface{}]interface{}); raw != nil {
-		connLimitConfig, err := connlimit.ParseConnLimitConfig(raw)
-		if err != nil {
-			return err
-		}
-		h.connLimitConfig = connLimitConfig
-	}
+	h.listenPort = port
 	if rateLimit := plugin.GetRatelimit(); rateLimit != nil {
-		log.Infof("http server open the ratelimit")
+		log.Infof("nacos http server open the ratelimit")
 		h.rateLimit = rateLimit
 	}
 
 	if whitelist := plugin.GetWhitelist(); whitelist != nil {
-		log.Infof("http server open the whitelist")
+		log.Infof("nacos http server open the whitelist")
 		h.whitelist = whitelist
 	}
-
-	// tls 配置信息
-	if raw, _ := option["tls"].(map[interface{}]interface{}); raw != nil {
-		tlsConfig, err := secure.ParseTLSConfig(raw)
-		if err != nil {
-			return err
-		}
-		h.tlsInfo = &secure.TLSInfo{
-			CertFile:      tlsConfig.CertFile,
-			KeyFile:       tlsConfig.KeyFile,
-			TrustedCAFile: tlsConfig.TrustedCAFile,
-		}
-	}
-
-	metrics.SetMetricsPort(int32(h.listenPort))
-	return nil
 }
 
 // Run 启动HTTP API服务器
 func (h *NacosV1Server) Run(errCh chan error) {
-	log.Infof("start NacosV1Server")
+	log.Infof("start nacos http server")
 	h.exitCh = make(chan struct{}, 1)
 	h.start = true
 	defer func() {
@@ -139,39 +119,20 @@ func (h *NacosV1Server) Run(errCh chan error) {
 		h.start = false
 	}()
 
-	var err error
-
-	authSvr, err := auth.GetAuthServer()
-	if err != nil {
-		log.Errorf("%v", err)
-		errCh <- err
-		return
-	}
-
-	h.authServer = authSvr
-
-	h.healthSvr, err = healthcheck.GetServer()
-	if err != nil {
-		log.Errorf("%v", err)
-		errCh <- err
-		return
-	}
-
 	// 初始化http server
 	address := fmt.Sprintf("%v:%v", h.listenIP, h.listenPort)
 
 	var wsContainer *restful.Container
-	wsContainer, err = h.createRestfulContainer()
+	wsContainer, err := h.createRestfulContainer()
 	if err != nil {
 		errCh <- err
 		return
 	}
 
 	server := http.Server{Addr: address, Handler: wsContainer, WriteTimeout: 1 * time.Minute}
-	var ln net.Listener
-	ln, err = net.Listen("tcp", address)
+	ln, err := net.Listen("tcp", address)
 	if err != nil {
-		log.Errorf("net listen(%s) err: %s", address, err.Error())
+		log.Errorf("nacos http server net listen(%s) err: %s", address, err.Error())
 		errCh <- err
 		return
 	}
@@ -179,7 +140,7 @@ func (h *NacosV1Server) Run(errCh chan error) {
 	ln = &tcpKeepAliveListener{ln.(*net.TCPListener)}
 	// 开启最大连接数限制
 	if h.connLimitConfig != nil && h.connLimitConfig.OpenConnLimit {
-		log.Infof("http server use max connection limit per ip: %d, http max limit: %d",
+		log.Infof("nacos http server use max connection limit per ip: %d, http max limit: %d",
 			h.connLimitConfig.MaxConnPerHost, h.connLimitConfig.MaxConnLimit)
 		ln, err = connlimit.NewListener(ln, h.GetProtocol(), h.connLimitConfig)
 		if err != nil {
@@ -198,15 +159,11 @@ func (h *NacosV1Server) Run(errCh chan error) {
 	}
 	if err != nil {
 		log.Errorf("%+v", err)
-		if !h.restart {
-			log.Infof("not in restart progress, broadcast error")
-			errCh <- err
-		}
-
+		errCh <- err
 		return
 	}
 
-	log.Infof("NacosV1Server stop")
+	log.Infof("nacos http server stop")
 }
 
 // Stop shutdown server
@@ -217,12 +174,6 @@ func (h *NacosV1Server) Stop() {
 	if h.server != nil {
 		_ = h.server.Close()
 	}
-}
-
-// Restart restart server
-func (h *NacosV1Server) Restart(option map[string]interface{}, apiConf map[string]apiserver.APIConfig,
-	errCh chan error) error {
-	return nil
 }
 
 // createRestfulContainer create handler
@@ -316,7 +267,7 @@ func (h *NacosV1Server) postProcess(req *restful.Request, rsp *restful.Response)
 	diff := now.Sub(startTime)
 	// 打印耗时超过1s的请求
 	if diff > time.Second {
-		nacoslog.Info("handling time > 1s",
+		nacoslog.Info("nacos http server handling time > 1s",
 			zap.String("client-address", req.Request.RemoteAddr),
 			zap.String("user-agent", req.HeaderParameter("User-Agent")),
 			utils.ZapRequestID(req.HeaderParameter("Request-Id")),
@@ -352,11 +303,11 @@ func (h *NacosV1Server) enterAuth(req *restful.Request, rsp *restful.Response) e
 		return nil
 	}
 	if !h.whitelist.Contain(segments[0]) {
-		log.Error("http access is not allowed",
+		log.Error("nacos http server http access is not allowed",
 			zap.String("client", address),
 			utils.ZapRequestID(rid))
 		httpcommon.HTTPResponse(req, rsp, api.NotAllowedAccess)
-		return errors.New("http access is not allowed")
+		return errors.New("nacos http server http access is not allowed")
 	}
 	return nil
 }
@@ -377,7 +328,7 @@ func (h *NacosV1Server) enterRateLimit(req *restful.Request, rsp *restful.Respon
 		return nil
 	}
 	if ok := h.rateLimit.Allow(plugin.IPRatelimit, segments[0]); !ok {
-		log.Error("ip ratelimit is not allow", zap.String("client", address),
+		log.Error("nacos http server ip ratelimit is not allow", zap.String("client", address),
 			utils.ZapRequestID(rid))
 		httpcommon.HTTPResponse(req, rsp, api.IPRateLimit)
 		return errors.New("ip ratelimit is not allow")
@@ -387,7 +338,7 @@ func (h *NacosV1Server) enterRateLimit(req *restful.Request, rsp *restful.Respon
 	apiName := fmt.Sprintf("%s:%s", req.Request.Method,
 		strings.TrimSuffix(req.Request.URL.Path, "/"))
 	if ok := h.rateLimit.Allow(plugin.APIRatelimit, apiName); !ok {
-		log.Error("api ratelimit is not allow", zap.String("client", address),
+		log.Error("nacos http server api ratelimit is not allow", zap.String("client", address),
 			utils.ZapRequestID(rid), zap.String("api", apiName))
 		httpcommon.HTTPResponse(req, rsp, api.APIRateLimit)
 		return errors.New("api ratelimit is not allow")

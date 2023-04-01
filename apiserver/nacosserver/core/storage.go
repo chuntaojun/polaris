@@ -21,31 +21,51 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"time"
 
 	nacosmodel "github.com/polarismesh/polaris/apiserver/nacosserver/model"
+	"github.com/polarismesh/polaris/cache"
+	"github.com/polarismesh/polaris/common/eventhub"
 	"github.com/polarismesh/polaris/common/model"
 )
 
-type InstanceFilter func(ctx context.Context, svcInfo *nacosmodel.ServiceInfo, ins []*nacosmodel.Instance, healthyCount int32) *nacosmodel.ServiceInfo
+type InstanceFilter func(ctx context.Context, svcInfo *nacosmodel.ServiceInfo,
+	ins []*nacosmodel.Instance, healthyCount int32) *nacosmodel.ServiceInfo
+
+func NewNacosDataStorage(ctx context.Context, cacheMgr *cache.CacheManager) *NacosDataStorage {
+
+	subCtx, cancel := context.WithCancel(ctx)
+
+	return &NacosDataStorage{
+		cacheMgr:   cacheMgr,
+		ctx:        subCtx,
+		cancel:     cancel,
+		namespaces: map[string]map[string]*ServiceData{},
+	}
+}
 
 type NacosDataStorage struct {
-	lock     sync.RWMutex
-	services map[string]map[string]*ServiceData
+	cacheMgr *cache.CacheManager
+
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	lock       sync.RWMutex
+	namespaces map[string]map[string]*ServiceData
+
+	revisions map[string]string
 }
 
-type ServiceData struct {
-	lock      sync.RWMutex
-	instances map[string]*nacosmodel.Instance
-}
-
-func (n *NacosDataStorage) ListInstances(ctx context.Context, svc model.ServiceKey, clusters []string, filter InstanceFilter) *nacosmodel.ServiceInfo {
+// ListInstances list nacos instances by filter
+func (n *NacosDataStorage) ListInstances(ctx context.Context, svc model.ServiceKey,
+	clusters []string, filter InstanceFilter) *nacosmodel.ServiceInfo {
 	service := nacosmodel.GetServiceName(svc.Name)
 	group := nacosmodel.GetServiceName(svc.Name)
 
 	n.lock.RLock()
 	defer n.lock.RUnlock()
 
-	services, ok := n.services[svc.Namespace]
+	services, ok := n.namespaces[svc.Namespace]
 	if !ok {
 		return nacosmodel.NewEmptyServiceInfo(service, group)
 	}
@@ -73,11 +93,8 @@ func (n *NacosDataStorage) ListInstances(ctx context.Context, svc model.ServiceK
 	}
 
 	healthCount := int32(0)
-	for i := range svcInfo.instances {
-		ins := svcInfo.instances[i]
-		if !ins.Enabled {
-			continue
-		}
+	for i := range svcInfo.enableInstances {
+		ins := svcInfo.enableInstances[i]
 		if _, ok := clusterSet[ins.ClusterName]; !ok {
 			continue
 		}
@@ -92,4 +109,111 @@ func (n *NacosDataStorage) ListInstances(ctx context.Context, svc model.ServiceK
 		return resultInfo
 	}
 	return filter(ctx, resultInfo, ret, healthCount)
+}
+
+func (n *NacosDataStorage) RunSync() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-ticker.C:
+			n.syncTask()
+		}
+	}
+}
+
+func (n *NacosDataStorage) syncTask() {
+	// 定期将服务数据转为 Nacos 的服务数据缓存
+	nsList := n.cacheMgr.Namespace().GetNamespaceList()
+	needSync := map[string]*model.Service{}
+
+	// 计算需要 refresh 的服务信息列表
+	for _, ns := range nsList {
+		_, svcs := n.cacheMgr.Service().ListServices(ns.Name)
+		for _, svc := range svcs {
+			revision := n.cacheMgr.GetServiceInstanceRevision(svc.ID)
+			oldRevision, ok := n.revisions[svc.ID]
+			if !ok || revision != oldRevision {
+				needSync[svc.ID] = svc
+			}
+		}
+	}
+
+	svcInfos := make([]nacosmodel.SimpleServiceInfo, 0, len(needSync))
+
+	// 遍历需要 refresh 数据的服务信息列表
+	for _, svc := range needSync {
+		svcData := n.loadNacosService(svc)
+		svcInfos = append(svcInfos, nacosmodel.SimpleServiceInfo{
+			Name:      svcData.name,
+			GroupName: svcData.group,
+		})
+		instances := n.cacheMgr.Instance().GetInstancesByServiceID(svc.ID)
+		svcData.loadInstances(instances)
+	}
+
+	// 发布服务信息变更事件
+	eventhub.Publish(nacosmodel.NacosServicesChangeEventTopic, &nacosmodel.NacosServicesChangeEvent{
+		Services: svcInfos,
+	})
+}
+
+func (n *NacosDataStorage) loadNacosService(svc *model.Service) *ServiceData {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+
+	if _, ok := n.namespaces[svc.Namespace]; !ok {
+		n.namespaces[svc.Namespace] = map[string]*ServiceData{}
+	}
+	services := n.namespaces[svc.Namespace]
+	if val, ok := services[svc.Name]; ok {
+		return val
+	}
+
+	var (
+		name  = svc.Name
+		group = nacosmodel.DefaultServiceGroup
+	)
+	if val, ok := svc.Meta[nacosmodel.InternalNacosServiceType]; ok && val == "true" {
+		name = nacosmodel.GetServiceName(svc.Name)
+		group = nacosmodel.GetGroupName(svc.Name)
+	}
+	return &ServiceData{
+		specService: svc,
+		name:        name,
+		group:       group,
+		instances:   map[string]*nacosmodel.Instance{},
+	}
+}
+
+type ServiceData struct {
+	specService     *model.Service
+	name            string
+	group           string
+	lock            sync.RWMutex
+	enableInstances []*nacosmodel.Instance
+	instances       map[string]*nacosmodel.Instance
+}
+
+func (s *ServiceData) loadInstances(instances []*model.Instance) {
+	var (
+		finalInstances       = map[string]*nacosmodel.Instance{}
+		finalEnableInstances = make([]*nacosmodel.Instance, 0, 16)
+	)
+
+	for i := range instances {
+		ins := &nacosmodel.Instance{}
+		ins.FromSpecInstance(instances[i])
+		if ins.Enabled {
+			finalEnableInstances = append(finalEnableInstances, ins)
+		}
+		finalInstances[ins.Id] = ins
+	}
+
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	s.instances = finalInstances
+	s.enableInstances = finalEnableInstances
 }

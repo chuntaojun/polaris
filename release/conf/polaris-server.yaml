@@ -279,6 +279,17 @@ apiservers:
         openConnLimit: false
         maxConnPerHost: 128
         maxConnLimit: 10240
+  - name: service-nacos
+    option:
+      listenIP: "0.0.0.0"
+      listenPort: 8848
+      connLimit:
+        openConnLimit: false
+        maxConnPerHost: 1024
+        maxConnLimit: 10240
+        whiteList: 127.0.0.1
+        purgeCounterInterval: 10s
+        purgeCounterExpired: 5s
   # - name: service-l5
   #   option:
   #     listenIP: 0.0.0.0

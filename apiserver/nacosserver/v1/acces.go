@@ -29,7 +29,9 @@ import (
 func (n *NacosV1Server) GetClientServer() (*restful.WebService, error) {
 	ws := new(restful.WebService)
 	ws.Path("/nacos/v1/ns").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
-	return nil, nil
+	n.addServiceAccess(ws)
+	n.addInstanceAccess(ws)
+	return ws, nil
 }
 
 func (n *NacosV1Server) addServiceAccess(ws *restful.WebService) {

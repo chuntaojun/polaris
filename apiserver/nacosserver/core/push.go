@@ -22,10 +22,17 @@ import (
 	"github.com/polarismesh/polaris/common/model"
 )
 
+type PushType string
+
+const (
+	UDPCPush PushType = "udp"
+	GRPCPush PushType = "grpc"
+)
+
 type PushCenter interface {
 	AddSubscriber(s Subscriber)
 	RemoveSubscriber(s Subscriber)
-	EnablePush(s Subscriber) bool
+	enablePush(s Subscriber) bool
 	Push(d *PushData)
 }
 
@@ -43,10 +50,56 @@ type Subscriber struct {
 	NamespaceId string
 	ServiceName string
 	Cluster     string
-	Type        string
+	Type        PushType
 }
 
-type PushCenterDelegate struct {
+func NewPushCenter() PushCenter {
+	return &PushCenterProxy{}
+}
+
+type PushCenterProxy struct {
 	udpPush  PushCenter
 	grpcPush PushCenter
+}
+
+func (p *PushCenterProxy) AddSubscriber(s Subscriber) {
+	if !p.enablePush(s) {
+		return
+	}
+	switch s.Type {
+	case UDPCPush:
+		p.udpPush.AddSubscriber(s)
+	case GRPCPush:
+		p.grpcPush.AddSubscriber(s)
+	default:
+	}
+}
+
+func (p *PushCenterProxy) RemoveSubscriber(s Subscriber) {
+	if !p.enablePush(s) {
+		return
+	}
+	switch s.Type {
+	case UDPCPush:
+		p.udpPush.RemoveSubscriber(s)
+	case GRPCPush:
+		p.grpcPush.RemoveSubscriber(s)
+	default:
+	}
+}
+
+func (p *PushCenterProxy) enablePush(s Subscriber) bool {
+	switch s.Type {
+	case UDPCPush:
+		return p.udpPush.enablePush(s)
+	case GRPCPush:
+		return p.grpcPush.enablePush(s)
+	default:
+		return false
+	}
+}
+
+func (p *PushCenterProxy) Push(d *PushData) {
+	p.udpPush.Push(d)
+	p.grpcPush.Push(d)
 }

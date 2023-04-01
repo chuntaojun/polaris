@@ -18,9 +18,18 @@
 package model
 
 import (
+	"strings"
+
+	"github.com/polarismesh/polaris/common/model"
+	"github.com/polarismesh/polaris/common/utils"
 	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
+
+type SimpleServiceInfo struct {
+	Name      string `json:"name"`
+	GroupName string `json:"groupName"`
+}
 
 type ServiceInfo struct {
 	Name                     string      `json:"name"`
@@ -51,6 +60,24 @@ type Instance struct {
 	ClusterName string            `json:"clusterName"`
 	ServiceName string            `json:"serviceName"`
 	Metadata    map[string]string `json:"metadata"`
+}
+
+func (i *Instance) FromSpecInstance(specIns *model.Instance) {
+	i.Id = specIns.ID()
+	i.IP = specIns.Host()
+	i.Port = int32(specIns.Port())
+	i.Weight = float64(specIns.Weight()) / 100
+	i.Ephemeral = true
+	i.Healthy = specIns.Healthy()
+	i.Enabled = !specIns.Isolate()
+
+	copyMeta := make(map[string]string)
+	for k, v := range specIns.Metadata() {
+		copyMeta[k] = v
+	}
+	i.Metadata = copyMeta
+	i.ClusterName = i.Metadata[InternalNacosCluster]
+	i.ServiceName = i.Metadata[InternalNacosServiceName]
 }
 
 func (i *Instance) DeepClone() *Instance {
@@ -124,4 +151,22 @@ type ClientBeat struct {
 
 func (c *ClientBeat) ToSpecInstance() (*apiservice.Instance, error) {
 	return nil, nil
+}
+
+func PrepareSpecInstance(namespace, service string, ins *Instance) *apiservice.Instance {
+	pSvc := ReplaceNacosService(service)
+
+	specIns := ins.ToSpecInstance()
+	specIns.Service = utils.NewStringValue(pSvc)
+	specIns.Namespace = utils.NewStringValue(namespace)
+
+	specIns.Metadata[InternalNacosCluster] = ins.ClusterName
+	specIns.Metadata[InternalNacosServiceName] = ins.ServiceName
+
+	return specIns
+}
+
+func ReplaceNacosService(service string) string {
+	// nacos 的服务名和分组名默认是通过 @@ 进行连接的，这里可能需要按照北极星服务名支持的方式，replace 替换下 @@ 连接符号为 __
+	return strings.ReplaceAll(service, DefaultNacosGroupConnectStr, ReplaceNacosGroupConnectStr)
 }

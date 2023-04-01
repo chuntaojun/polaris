@@ -23,9 +23,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/polarismesh/polaris/apiserver/nacosserver/core"
 	"github.com/polarismesh/polaris/apiserver/nacosserver/model"
 	commonmodel "github.com/polarismesh/polaris/common/model"
 	"github.com/polarismesh/polaris/common/utils"
+	"github.com/polarismesh/polaris/service"
 	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
 	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
 )
@@ -35,8 +37,14 @@ type (
 	keyService     struct{}
 )
 
-func (n *NacosV1Server) handleRegister(ctx context.Context, namespace, service string, ins *model.Instance) error {
-	specIns := prepareSpecInstance(namespace, service, ins)
+func (n *NacosV1Server) handleRegister(ctx context.Context, namespace, serviceName string, ins *model.Instance) error {
+	specIns := model.PrepareSpecInstance(namespace, serviceName, ins)
+	ctx = context.WithValue(ctx, service.KeyModifyService{}, func(svc *apiservice.Service) {
+		if len(svc.Metadata) == 0 {
+			svc.Metadata = map[string]string{}
+		}
+		svc.Metadata[model.InternalNacosServiceType] = strconv.FormatBool(true)
+	})
 
 	resp := n.discoverSvr.RegisterInstance(ctx, specIns)
 	if apimodel.Code(resp.GetCode().GetValue()) != apimodel.Code_ExecuteSuccess {
@@ -49,7 +57,7 @@ func (n *NacosV1Server) handleRegister(ctx context.Context, namespace, service s
 }
 
 func (n *NacosV1Server) handleDeregister(ctx context.Context, namespace, service string, ins *model.Instance) error {
-	specIns := prepareSpecInstance(namespace, service, ins)
+	specIns := model.PrepareSpecInstance(namespace, service, ins)
 
 	resp := n.discoverSvr.DeregisterInstance(ctx, specIns)
 	if apimodel.Code(resp.GetCode().GetValue()) != apimodel.Code_ExecuteSuccess {
@@ -62,9 +70,10 @@ func (n *NacosV1Server) handleDeregister(ctx context.Context, namespace, service
 }
 
 // handleBeat com.alibaba.nacos.naming.core.InstanceOperatorClientImpl#handleBeat
-func (n *NacosV1Server) handleBeat(ctx context.Context, namespace, service string, clientBeat *model.ClientBeat) (map[string]interface{}, error) {
+func (n *NacosV1Server) handleBeat(ctx context.Context, namespace, service string,
+	clientBeat *model.ClientBeat) (map[string]interface{}, error) {
 	resp := n.healthSvr.Report(ctx, &apiservice.Instance{
-		Service:   utils.NewStringValue(replaceNacosService(service)),
+		Service:   utils.NewStringValue(model.ReplaceNacosService(service)),
 		Namespace: utils.NewStringValue(namespace),
 		Host:      utils.NewStringValue(clientBeat.Ip),
 		Port:      utils.NewUInt32Value(uint32(clientBeat.Port)),
@@ -95,15 +104,26 @@ func (n *NacosV1Server) handleQueryInstances(ctx context.Context, params map[str
 	namespace := params[model.ParamNamespaceID]
 	service := params[model.ParamServiceName]
 	clusters := params["clusters"]
+	clientIP, _ := params["clientIP"]
 	udpPort, _ := strconv.ParseInt(params["udpPort"], 10, 32)
 	healthyOnly, _ := strconv.ParseBool(params["healthyOnly"])
 
-	if udpPort > 0 {
+	if n.pushCenter != nil && udpPort > 0 {
 		// TODO 加入到 pushCenter 的任务中
+		n.pushCenter.AddSubscriber(core.Subscriber{
+			Agent:       "",
+			App:         "",
+			AddrStr:     clientIP,
+			Ip:          clientIP,
+			Port:        int(udpPort),
+			NamespaceId: namespace,
+			ServiceName: service,
+			Cluster:     clusters,
+			Type:        core.UDPCPush,
+		})
 	}
 
 	ctx = context.WithValue(ctx, keyHealthyOnly{}, healthyOnly)
-
 	// 默认只下发 enable 的实例
 	result := n.store.ListInstances(ctx, commonmodel.ServiceKey{
 		Namespace: namespace,
@@ -116,7 +136,8 @@ func (n *NacosV1Server) handleQueryInstances(ctx context.Context, params map[str
 	return result, nil
 }
 
-func selectInstancesWithHealthyProtection(ctx context.Context, result *model.ServiceInfo, instances []*model.Instance, healthCount int32) *model.ServiceInfo {
+func selectInstancesWithHealthyProtection(ctx context.Context, result *model.ServiceInfo,
+	instances []*model.Instance, healthCount int32) *model.ServiceInfo {
 	healthyOnly, _ := ctx.Value(keyHealthyOnly{}).(bool)
 
 	checkProtectThreshold := false
@@ -158,22 +179,4 @@ func selectInstancesWithHealthyProtection(ctx context.Context, result *model.Ser
 	result.ReachProtectionThreshold = true
 	result.Hosts = ret
 	return result
-}
-
-func prepareSpecInstance(namespace, service string, ins *model.Instance) *apiservice.Instance {
-	pSvc := replaceNacosService(service)
-
-	specIns := ins.ToSpecInstance()
-	specIns.Service = utils.NewStringValue(pSvc)
-	specIns.Namespace = utils.NewStringValue(namespace)
-
-	specIns.Metadata[model.InternalNacosCluster] = ins.ClusterName
-	specIns.Metadata[model.InternalNacosServiceName] = ins.ServiceName
-
-	return specIns
-}
-
-func replaceNacosService(service string) string {
-	// nacos 的服务名和分组名默认是通过 @@ 进行连接的，这里可能需要按照北极星服务名支持的方式，replace 替换下 @@ 连接符号为 __
-	return strings.ReplaceAll(service, model.DefaultNacosGroupConnectStr, model.ReplaceNacosGroupConnectStr)
 }

@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/polarismesh/polaris/apiserver/nacosserver/core"
+	commontime "github.com/polarismesh/polaris/common/time"
 )
 
 type UdpPushCenter struct {
@@ -51,17 +52,35 @@ func (p *UdpPushCenter) AddSubscriber(s core.Subscriber) {
 		p.connectors[s.NamespaceId][s.ServiceName] = map[string]*Connector{}
 	}
 	if _, ok := p.connectors[s.NamespaceId][s.ServiceName][id]; !ok {
-		conn := NewConnector(s)
+		conn := newConnector(s)
 		p.connectors[s.NamespaceId][s.ServiceName][id] = conn
 	}
 }
 
 func (p *UdpPushCenter) RemoveSubscriber(s core.Subscriber) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
 
+	id := fmt.Sprintf("%s:%d", s.AddrStr, s.Port)
+	if _, ok := p.subscribers[id]; !ok {
+		return
+	}
+
+	if _, ok := p.connectors[s.NamespaceId]; ok {
+		if _, ok = p.connectors[s.NamespaceId][s.ServiceName]; ok {
+			if _, ok = p.connectors[s.NamespaceId][s.ServiceName][id]; ok {
+				connections := p.connectors[s.NamespaceId][s.ServiceName]
+				delete(connections, id)
+				p.connectors[s.NamespaceId][s.ServiceName] = connections
+			}
+		}
+	}
+
+	delete(p.subscribers, id)
 }
 
-func (p *UdpPushCenter) EnablePush(s core.Subscriber) bool {
-	return true
+func (p *UdpPushCenter) enablePush(s core.Subscriber) bool {
+	return core.UDPCPush == s.Type
 }
 
 func (p *UdpPushCenter) Push(d *core.PushData) {
@@ -85,16 +104,16 @@ func (p *UdpPushCenter) Push(d *core.PushData) {
 	}
 }
 
-func NewConnector(s core.Subscriber) *Connector {
+func newConnector(s core.Subscriber) *Connector {
 	return &Connector{
 		subscriber: s,
 	}
 }
 
 type Connector struct {
-	subscriber core.Subscriber
-	conn       *net.UDPConn
-	lastErr    error
+	subscriber  core.Subscriber
+	conn        *net.UDPConn
+	lastRefTime int64
 }
 
 func (c *Connector) connect() error {
@@ -114,6 +133,6 @@ func (c *Connector) send(data []byte) {
 
 }
 
-func (c *Connector) IsAlive() bool {
-	return c.lastErr == nil
+func (c *Connector) IsZombie() bool {
+	return commontime.CurrentMillisecond()-c.lastRefTime > 10*1000
 }

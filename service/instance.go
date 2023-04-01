@@ -945,19 +945,25 @@ func (s *Server) sendDiscoverEvent(event model.InstanceEvent) {
 	eventhub.Publish(eventhub.InstanceEventTopic, event)
 }
 
-type wrapSvcName interface {
-	// GetService 获取服务名
-	GetService() *wrappers.StringValue
-	// GetNamespace 获取命名空间
-	GetNamespace() *wrappers.StringValue
-}
+type (
+	KeyModifyService struct{}
 
-type rawSvcName interface {
-	// GetService 获取服务名
-	GetService() string
-	// GetNamespace 获取命名空间
-	GetNamespace() string
-}
+	ModifyService func(svc *apiservice.Service)
+
+	wrapSvcName interface {
+		// GetService 获取服务名
+		GetService() *wrappers.StringValue
+		// GetNamespace 获取命名空间
+		GetNamespace() *wrappers.StringValue
+	}
+
+	rawSvcName interface {
+		// GetService 获取服务名
+		GetService() string
+		// GetNamespace 获取命名空间
+		GetNamespace() string
+	}
+)
 
 // createWrapServiceIfAbsent 如果服务不存在，则进行创建，并返回服务的ID信息
 func (s *Server) createWrapServiceIfAbsent(ctx context.Context, instance wrapSvcName) (string, *apiservice.Response) {
@@ -987,6 +993,12 @@ func (s *Server) createServiceIfAbsent(
 			MetadataInternalAutoCreated: "true",
 		},
 	}
+	if val := ctx.Value(KeyModifyService{}); val != nil {
+		if f, ok := val.(ModifyService); ok {
+			f(simpleService)
+		}
+	}
+
 	key := fmt.Sprintf("%s:%s", simpleService.Namespace, simpleService.Name)
 	ret, err, _ := s.createServiceSingle.Do(key, func() (interface{}, error) {
 		resp := s.CreateService(ctx, simpleService)
