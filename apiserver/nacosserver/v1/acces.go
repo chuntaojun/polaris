@@ -29,43 +29,37 @@ import (
 func (n *NacosV1Server) GetClientServer() (*restful.WebService, error) {
 	ws := new(restful.WebService)
 	ws.Path("/nacos/v1/ns").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
-	n.addServiceAccess(ws)
 	n.addInstanceAccess(ws)
 	return ws, nil
 }
 
-func (n *NacosV1Server) addServiceAccess(ws *restful.WebService) {
-	ws.Route(ws.GET("/service").To(n.GetService))
-	ws.Route(ws.POST("/service").To(n.CreateService))
-	ws.Route(ws.DELETE("/service").To(n.DeleteService))
-	ws.Route(ws.PUT("/service").To(n.UpdateService))
-	ws.Route(ws.GET("/service/list").To(n.ListServices))
+func (n *NacosV1Server) GetAuthServer() (*restful.WebService, error) {
+	ws := new(restful.WebService)
+	ws.Route(ws.POST("/v1/auth/login").To(n.Login))
+	ws.Route(ws.POST("/v1/auth/users/login").To(n.Login))
+	return ws, nil
 }
 
 func (n *NacosV1Server) addInstanceAccess(ws *restful.WebService) {
 	ws.Route(ws.POST("/instance").To(n.RegisterInstance))
 	ws.Route(ws.DELETE("/instance").To(n.DeRegisterInstance))
+	ws.Route(ws.PUT("/instance/beat").To(n.Heartbeat))
 	ws.Route(ws.GET("/instance/list").To(n.ListInstances))
 }
 
-func (n *NacosV1Server) GetService(req *restful.Request, rsp *restful.Response) {
+func (n *NacosV1Server) Login(req *restful.Request, rsp *restful.Response) {
+	handler := httpcommon.Handler{
+		Request:  req,
+		Response: rsp,
+	}
 
-}
-
-func (n *NacosV1Server) CreateService(req *restful.Request, rsp *restful.Response) {
-
-}
-
-func (n *NacosV1Server) DeleteService(req *restful.Request, rsp *restful.Response) {
-
-}
-
-func (n *NacosV1Server) UpdateService(req *restful.Request, rsp *restful.Response) {
-
-}
-
-func (n *NacosV1Server) ListServices(req *restful.Request, rsp *restful.Response) {
-
+	ctx := handler.ParseHeaderContext()
+	data, err := n.handleLogin(ctx, httpcommon.ParseQueryParams(req))
+	if err != nil {
+		core.WrirteNacosErrorResponse(err, rsp)
+		return
+	}
+	core.WrirteNacosResponse(data, rsp)
 }
 
 func (n *NacosV1Server) RegisterInstance(req *restful.Request, rsp *restful.Response) {
@@ -74,8 +68,6 @@ func (n *NacosV1Server) RegisterInstance(req *restful.Request, rsp *restful.Resp
 		Response: rsp,
 	}
 
-	ctx := handler.ParseHeaderContext()
-
 	namespace := optional(req, model.ParamNamespaceID, model.DefaultNacosNamespace)
 	ins, err := BuildInstance(namespace, req)
 	if err != nil {
@@ -83,6 +75,7 @@ func (n *NacosV1Server) RegisterInstance(req *restful.Request, rsp *restful.Resp
 		return
 	}
 
+	ctx := handler.ParseHeaderContext()
 	if err := n.handleRegister(ctx, namespace, ins.ServiceName, ins); err != nil {
 		core.WrirteNacosErrorResponse(err, rsp)
 		return
@@ -96,8 +89,6 @@ func (n *NacosV1Server) DeRegisterInstance(req *restful.Request, rsp *restful.Re
 		Response: rsp,
 	}
 
-	ctx := handler.ParseHeaderContext()
-
 	namespace := optional(req, model.ParamNamespaceID, model.DefaultNacosNamespace)
 	ins, err := BuildInstance(namespace, req)
 	if err != nil {
@@ -105,6 +96,7 @@ func (n *NacosV1Server) DeRegisterInstance(req *restful.Request, rsp *restful.Re
 		return
 	}
 
+	ctx := handler.ParseHeaderContext()
 	if err := n.handleDeregister(ctx, namespace, ins.ServiceName, ins); err != nil {
 		core.WrirteNacosErrorResponse(err, rsp)
 		return
@@ -118,14 +110,13 @@ func (n *NacosV1Server) Heartbeat(req *restful.Request, rsp *restful.Response) {
 		Response: rsp,
 	}
 
-	ctx := handler.ParseHeaderContext()
-
 	beat, err := BuildClientBeat(req)
 	if err != nil {
 		core.WrirteNacosErrorResponse(err, rsp)
 		return
 	}
 
+	ctx := handler.ParseHeaderContext()
 	data, err := n.handleBeat(ctx, beat.Namespace, beat.ServiceName, beat)
 	if err != nil {
 		core.WrirteNacosErrorResponse(err, rsp)
@@ -141,7 +132,6 @@ func (n *NacosV1Server) ListInstances(req *restful.Request, rsp *restful.Respons
 	}
 
 	ctx := handler.ParseHeaderContext()
-
 	data, err := n.handleQueryInstances(ctx, httpcommon.ParseQueryParams(req))
 	if err != nil {
 		core.WrirteNacosErrorResponse(err, rsp)
@@ -151,5 +141,4 @@ func (n *NacosV1Server) ListInstances(req *restful.Request, rsp *restful.Respons
 }
 
 func (n *NacosV1Server) ServerHealthStatus(req *restful.Request, rsp *restful.Response) {
-
 }

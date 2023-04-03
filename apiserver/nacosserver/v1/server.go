@@ -199,6 +199,12 @@ func (h *NacosV1Server) createRestfulContainer() (*restful.Container, error) {
 	}
 	wsContainer.Add(clientSvc)
 
+	authSvc, err := h.GetAuthServer()
+	if err != nil {
+		return nil, err
+	}
+	wsContainer.Add(authSvc)
+
 	return wsContainer, nil
 }
 
@@ -219,7 +225,6 @@ func (h *NacosV1Server) process(req *restful.Request, rsp *restful.Response, cha
 func (h *NacosV1Server) preprocess(req *restful.Request, rsp *restful.Response) error {
 	// 设置开始时间
 	req.SetAttribute("start-time", time.Now())
-
 	requestURL := req.Request.URL.String()
 	// 打印请求
 	nacoslog.Info("receive request",
@@ -229,16 +234,15 @@ func (h *NacosV1Server) preprocess(req *restful.Request, rsp *restful.Response) 
 		zap.String("url", requestURL),
 	)
 
-	// 管理端接口访问鉴权
-	if strings.Contains(requestURL, "naming") {
-		if err := h.enterAuth(req, rsp); err != nil {
-			return err
-		}
-	}
-
 	// 限流
 	if err := h.enterRateLimit(req, rsp); err != nil {
 		return err
+	}
+
+	// 处理 jwt
+	accessToken := req.QueryParameter("accessToken")
+	if accessToken != "" {
+		req.Request.Header.Set(utils.HeaderAuthTokenKey, accessToken)
 	}
 
 	return nil
