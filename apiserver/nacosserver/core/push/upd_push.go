@@ -136,3 +136,13 @@ func (c *Connector) send(data []byte) {
 func (c *Connector) IsZombie() bool {
 	return commontime.CurrentMillisecond()-c.lastRefTime > 10*1000
 }
+
+const (
+	maxDataSizeUncompress = 1024
+)
+
+func compressIfNecessary(data []byte) []byte {
+	if len(data) <= maxDataSizeUncompress {
+		return data
+	}
+}

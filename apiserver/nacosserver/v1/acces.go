@@ -30,6 +30,7 @@ func (n *NacosV1Server) GetClientServer() (*restful.WebService, error) {
 	ws := new(restful.WebService)
 	ws.Path("/nacos/v1/ns").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
 	n.addInstanceAccess(ws)
+	n.addSystemAccess(ws)
 	return ws, nil
 }
 
@@ -45,6 +46,10 @@ func (n *NacosV1Server) addInstanceAccess(ws *restful.WebService) {
 	ws.Route(ws.DELETE("/instance").To(n.DeRegisterInstance))
 	ws.Route(ws.PUT("/instance/beat").To(n.Heartbeat))
 	ws.Route(ws.GET("/instance/list").To(n.ListInstances))
+}
+
+func (n *NacosV1Server) addSystemAccess(ws *restful.WebService) {
+	ws.Route(ws.GET("/operator/metrics").To(n.ServerHealthStatus))
 }
 
 func (n *NacosV1Server) Login(req *restful.Request, rsp *restful.Response) {
@@ -141,4 +146,7 @@ func (n *NacosV1Server) ListInstances(req *restful.Request, rsp *restful.Respons
 }
 
 func (n *NacosV1Server) ServerHealthStatus(req *restful.Request, rsp *restful.Response) {
+	core.WrirteNacosResponse(map[string]interface{}{
+		"status": "UP",
+	}, rsp)
 }

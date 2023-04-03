@@ -36,6 +36,7 @@ import (
 	v2 "github.com/polarismesh/polaris/apiserver/httpserver/v2"
 	"github.com/polarismesh/polaris/auth"
 	api "github.com/polarismesh/polaris/common/api/v1"
+	"github.com/polarismesh/polaris/common/conn/keepalive"
 	connlimit "github.com/polarismesh/polaris/common/conn/limit"
 	commonlog "github.com/polarismesh/polaris/common/log"
 	"github.com/polarismesh/polaris/common/metrics"
@@ -221,7 +222,7 @@ func (h *HTTPServer) Run(errCh chan error) {
 		return
 	}
 
-	ln = &tcpKeepAliveListener{ln.(*net.TCPListener)}
+	ln = keepalive.NewTcpKeepAliveListener(keepalive.DefaultAlivePeriodTime, ln.(*net.TCPListener))
 	// 开启最大连接数限制
 	if h.connLimitConfig != nil && h.connLimitConfig.OpenConnLimit {
 		log.Infof("http server use max connection limit per ip: %d, http max limit: %d",
@@ -582,34 +583,4 @@ func (h *HTTPServer) enterRateLimit(req *restful.Request, rsp *restful.Response)
 	}
 
 	return nil
-}
-
-// tcpKeepAliveListener sets TCP keep-alive timeouts on accepted
-// connections. It's used by ListenAndServe and ListenAndServeTLS so
-// dead TCP connections (e.g. closing laptop mid-download) eventually
-// go away.
-// 来自net/http
-type tcpKeepAliveListener struct {
-	*net.TCPListener
-}
-
-var defaultAlivePeriodTime = 3 * time.Minute
-
-// Accept 来自于net/http
-func (ln tcpKeepAliveListener) Accept() (net.Conn, error) {
-	tc, err := ln.AcceptTCP()
-	if err != nil {
-		return nil, err
-	}
-	err = tc.SetKeepAlive(true)
-	if err != nil {
-		return nil, err
-	}
-
-	err = tc.SetKeepAlivePeriod(defaultAlivePeriodTime)
-	if err != nil {
-		return nil, err
-	}
-
-	return tc, nil
 }

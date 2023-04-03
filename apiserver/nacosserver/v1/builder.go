@@ -66,7 +66,7 @@ func BuildInstance(namespace string, req *restful.Request) (*model.Instance, err
 	}
 
 	return &model.Instance{
-		Id:          fmt.Sprintf("%s#%d#%s#%s", host),
+		Id:          fmt.Sprintf("%s#%s#%s#%s", namespace, service, host, portStr),
 		IP:          host,
 		Port:        int32(port),
 		Weight:      weight,
