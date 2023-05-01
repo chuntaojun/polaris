@@ -134,6 +134,21 @@ bootstrap:
       rotationMaxBackups: 10
       rotationMaxAge: 7
       outputLevel: info
+      # outputPaths:
+      #   - stdout
+      # errorOutputPaths:
+      #   - stderr
+    nacos-apiserver:
+      rotateOutputPath: log/runtime/nacos-apiserver.log
+      errorRotateOutputPath: log/runtime/nacos-apiserver-error.log
+      rotationMaxSize: 100
+      rotationMaxBackups: 10
+      rotationMaxAge: 7
+      outputLevel: info
+      # outputPaths:
+      # - stdout
+      # errorOutputPaths:
+      # - stderr
   # Start the server in order
   startInOrder:
     # Start the Polaris-Server in order, mainly to avoid data synchronization logic when the server starts the DB to pull the DB out of high load
@@ -262,6 +277,14 @@ apiservers:
     option:
       listenIP: "0.0.0.0"
       listenPort: 15010
+      connLimit:
+        openConnLimit: false
+        maxConnPerHost: 128
+        maxConnLimit: 10240
+  - name: service-nacos
+    option:
+      listenIP: "0.0.0.0"
+      listenPort: 8848
       connLimit:
         openConnLimit: false
         maxConnPerHost: 128
