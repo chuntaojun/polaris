@@ -23,11 +23,13 @@ import (
 	"fmt"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 
 	"github.com/polarismesh/polaris/common/batchjob"
 	commonhash "github.com/polarismesh/polaris/common/hash"
@@ -52,7 +54,7 @@ type Peer interface {
 	// Initialize .
 	Initialize(conf Config)
 	// Serve .
-	Serve(ctx context.Context, listenIP string, listenPort uint32) error
+	Serve(ctx context.Context, checker *LeaderHealthChecker, listenIP string, listenPort uint32) error
 	// Get .
 	Get(key string) (*ReadBeatRecord, error)
 	// Put .
@@ -74,13 +76,16 @@ type LocalPeer struct {
 	Cache BeatRecordCache
 	// cancel .
 	cancel context.CancelFunc
+	// closed .
+	closed int32
 }
 
 func (p *LocalPeer) Initialize(conf Config) {
 	p.Cache = newLocalBeatRecordCache(conf.SoltNum, commonhash.Fnv32)
 }
 
-func (p *LocalPeer) Serve(ctx context.Context, listenIP string, listenPort uint32) error {
+func (p *LocalPeer) Serve(ctx context.Context, checker *LeaderHealthChecker,
+	listenIP string, listenPort uint32) error {
 	log.Info("[HealthCheck][Leader] local peer serve")
 	return nil
 }
@@ -110,6 +115,9 @@ func (p *LocalPeer) Del(key string) error {
 
 // Close close peer life
 func (p *LocalPeer) Close() error {
+	if !atomic.CompareAndSwapInt32(&p.closed, 0, 1) {
+		return nil
+	}
 	log.Info("[HealthCheck][Leader] local peer close")
 	if p.cancel != nil {
 		p.cancel()
@@ -144,13 +152,20 @@ type RemotePeer struct {
 	cancel context.CancelFunc
 	// conf .
 	conf Config
+	// closed .
+	closed int32
 }
 
 func (p *RemotePeer) Initialize(conf Config) {
 	p.conf = conf
 }
 
-func (p *RemotePeer) Serve(_ context.Context, listenIP string, listenPort uint32) error {
+func (p *RemotePeer) isClose() bool {
+	return atomic.LoadInt32(&p.closed) == 1
+}
+
+func (p *RemotePeer) Serve(_ context.Context, checker *LeaderHealthChecker,
+	listenIP string, listenPort uint32) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 	p.host = listenIP
@@ -162,6 +177,9 @@ func (p *RemotePeer) Serve(_ context.Context, listenIP string, listenPort uint32
 			grpc.WithBlock(),
 			grpc.WithInsecure(),
 			grpc.WithTimeout(5*time.Second),
+			grpc.Header(&metadata.MD{
+				sendResource: []string{utils.LocalHost},
+			}),
 		)
 		if err != nil {
 			_ = p.Close()
@@ -171,30 +189,17 @@ func (p *RemotePeer) Serve(_ context.Context, listenIP string, listenPort uint32
 	}
 	p.Client = apiservice.NewPolarisGRPCClient(p.Conns[0])
 	for i := 0; i < streamNum; i++ {
-		puter, err := p.Client.BatchHeartbeat(ctx)
+		puter, err := p.Client.BatchHeartbeat(ctx, grpc.Header(&metadata.MD{
+			sendResource: []string{utils.LocalHost},
+		}))
 		if err != nil {
 			_ = p.Close()
 			return err
 		}
 		p.Puters = append(p.Puters, puter)
 	}
-	batchConf := p.conf.Batch
-	p.getBatchCtrl = batchjob.NewBatchController(ctx, batchjob.CtrlConfig{
-		Label:         "RecordGetter",
-		QueueSize:     batchConf.QueueSize,
-		WaitTime:      batchConf.WaitTime,
-		MaxBatchCount: batchConf.MaxBatchCount,
-		Concurrency:   batchConf.Concurrency,
-		Handler:       p.handleSendGetRecords,
-	})
-	p.putBatchCtrl = batchjob.NewBatchController(ctx, batchjob.CtrlConfig{
-		Label:         "RecordPutter",
-		QueueSize:     batchConf.QueueSize,
-		WaitTime:      batchConf.WaitTime,
-		MaxBatchCount: batchConf.MaxBatchCount,
-		Concurrency:   batchConf.Concurrency,
-		Handler:       p.handleSendPutRecords,
-	})
+	p.getBatchCtrl = checker.getBatchCtrl
+	p.putBatchCtrl = checker.putBatchCtrl
 	p.Cache = newRemoteBeatRecordCache(p.GetFunc, p.PutFunc, p.DelFunc)
 	return nil
 }
@@ -205,8 +210,11 @@ func (p *RemotePeer) Host() string {
 
 // Get get records
 func (p *RemotePeer) Get(key string) (*ReadBeatRecord, error) {
-	future := p.getBatchCtrl.Submit(key)
-	resp, err := future.Done()
+	future := p.getBatchCtrl.SubmitWithTimeout(&PeerTask{
+		Key:  key,
+		Peer: p,
+	}, time.Second)
+	resp, err := future.DoneTimeout(time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -216,8 +224,11 @@ func (p *RemotePeer) Get(key string) (*ReadBeatRecord, error) {
 
 // Put put records
 func (p *RemotePeer) Put(record WriteBeatRecord) error {
-	future := p.putBatchCtrl.Submit(record)
-	_, err := future.Done()
+	future := p.putBatchCtrl.SubmitWithTimeout(&PeerTask{
+		Record: &record,
+		Peer:   p,
+	}, time.Second)
+	_, err := future.DoneTimeout(time.Second)
 	return err
 }
 
@@ -228,7 +239,9 @@ func (p *RemotePeer) Del(key string) error {
 }
 
 func (p *RemotePeer) GetFunc(req *apiservice.GetHeartbeatsRequest) *apiservice.GetHeartbeatsResponse {
-	resp, err := p.Client.BatchGetHeartbeat(context.Background(), req)
+	resp, err := p.Client.BatchGetHeartbeat(context.Background(), req, grpc.Header(&metadata.MD{
+		sendResource: []string{utils.LocalHost},
+	}))
 	if err != nil {
 		plog.Error("[HealthCheck][Leader] send get record request", zap.String("host", p.Host()),
 			zap.Uint32("port", p.port), zap.Error(err))
@@ -246,7 +259,9 @@ func (p *RemotePeer) PutFunc(req *apiservice.HeartbeatsRequest) {
 }
 
 func (p *RemotePeer) DelFunc(req *apiservice.DelHeartbeatsRequest) {
-	if _, err := p.Client.BatchDelHeartbeat(context.Background(), req); err != nil {
+	if _, err := p.Client.BatchDelHeartbeat(context.Background(), req, grpc.Header(&metadata.MD{
+		sendResource: []string{utils.LocalHost},
+	})); err != nil {
 		plog.Error("send del record request", zap.String("host", p.Host()),
 			zap.Uint32("port", p.port), zap.Error(err))
 	}
@@ -258,6 +273,9 @@ func (p *RemotePeer) Storage() BeatRecordCache {
 
 // Close close peer life
 func (p *RemotePeer) Close() error {
+	if !atomic.CompareAndSwapInt32(&p.closed, 0, 1) {
+		return nil
+	}
 	if p.cancel != nil {
 		p.cancel()
 	}
@@ -271,64 +289,24 @@ func (p *RemotePeer) Close() error {
 			_ = p.Conns[i].Close()
 		}
 	}
-	if p.getBatchCtrl != nil {
-		p.getBatchCtrl.Stop()
-	}
-	if p.putBatchCtrl != nil {
-		p.putBatchCtrl.Stop()
-	}
 	return nil
 }
 
 var (
 	ErrorRecordNotFound = errors.New("beat record not found")
+	ErrorPeerClosed     = errors.New("peer alrady closed")
 )
 
-func (p *RemotePeer) handleSendGetRecords(tasks []batchjob.Future) {
-	keys := make([]string, 0, len(tasks))
-	futures := make(map[string][]batchjob.Future)
-	for i := range tasks {
-		taskInfo := tasks[i].Param()
-		key := taskInfo.(string)
-		keys = append(keys, key)
-		if _, ok := futures[key]; !ok {
-			futures[key] = make([]batchjob.Future, 0, 4)
-		}
-		futures[key] = append(futures[key], tasks[i])
-		keys = append(keys, key)
-	}
-
-	ret := p.Cache.Get(keys...)
-	for key := range ret {
-		fs := futures[key]
-		for _, f := range fs {
-			f.Reply(map[string]*ReadBeatRecord{
-				key: ret[key],
-			}, nil)
-		}
-	}
-	for i := range futures {
-		for _, f := range futures[i] {
-			f.Reply(nil, ErrorRecordNotFound)
-		}
-	}
-	for i := range futures {
-		for _, f := range futures[i] {
-			f.Reply(nil, ErrorRecordNotFound)
-		}
-	}
+// PeerWriteTask peer write task
+type PeerWriteTask struct {
+	Peer    *RemotePeer
+	Records []WriteBeatRecord
+	Futures []batchjob.Future
 }
 
-func (p *RemotePeer) handleSendPutRecords(tasks []batchjob.Future) {
-	records := make([]WriteBeatRecord, 0, len(tasks))
-	for i := range tasks {
-		taskInfo := tasks[i].Param()
-		req := taskInfo.(WriteBeatRecord)
-		records = append(records, req)
-	}
-
-	p.Cache.Put(records...)
-	for i := range tasks {
-		tasks[i].Reply(struct{}{}, nil)
-	}
+// PeerReadTask peer read task
+type PeerReadTask struct {
+	Peer    *RemotePeer
+	Keys    []string
+	Futures map[string][]batchjob.Future
 }

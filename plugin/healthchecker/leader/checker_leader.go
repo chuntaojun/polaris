@@ -19,13 +19,16 @@ package leader
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
+	"google.golang.org/grpc/metadata"
 
+	"github.com/polarismesh/polaris/common/batchjob"
 	"github.com/polarismesh/polaris/common/eventhub"
 	commontime "github.com/polarismesh/polaris/common/time"
 	"github.com/polarismesh/polaris/common/utils"
@@ -57,6 +60,8 @@ const (
 	uninitializeSignal = int32(0)
 	// initializedSignal .
 	initializedSignal = int32(1)
+	// sendResource .
+	sendResource = "leaderchecker"
 )
 
 var (
@@ -64,6 +69,10 @@ var (
 	DefaultSoltNum = int32(runtime.GOMAXPROCS(0) * 16)
 	// streamNum
 	streamNum = runtime.GOMAXPROCS(0)
+)
+
+var (
+	ErrorRedirectOnlyOnce = errors.New("redirect request only once")
 )
 
 // LeaderHealthChecker Leader~Follower 节点心跳健康检查
@@ -96,6 +105,10 @@ type LeaderHealthChecker struct {
 	self Peer
 	// s store.Store
 	s store.Store
+	// putBatchCtrl 批任务执行器
+	putBatchCtrl *batchjob.BatchController
+	// getBatchCtrl 批任务执行器
+	getBatchCtrl *batchjob.BatchController
 }
 
 // Name .
@@ -113,20 +126,38 @@ func (c *LeaderHealthChecker) Initialize(entry *plugin.ConfigEntry) error {
 	c.conf = conf
 	c.self = NewLocalPeerFunc()
 	c.self.Initialize(*conf)
-	if err := c.self.Serve(context.Background(), "", 0); err != nil {
+	if err := c.self.Serve(context.Background(), c, "", 0); err != nil {
 		return err
 	}
 	if err := eventhub.Subscribe(eventhub.LeaderChangeEventTopic, subscriberName, c); err != nil {
 		return err
 	}
-	storage, err := store.GetStore()
-	if err != nil {
-		return err
+	if c.s == nil {
+		storage, err := store.GetStore()
+		if err != nil {
+			return err
+		}
+		c.s = storage
 	}
-	c.s = storage
 	if err := c.s.StartLeaderElection(electionKey); err != nil {
 		return err
 	}
+	c.getBatchCtrl = batchjob.NewBatchController(context.Background(), batchjob.CtrlConfig{
+		Label:         "RecordGetter",
+		QueueSize:     conf.Batch.QueueSize,
+		WaitTime:      conf.Batch.WaitTime,
+		MaxBatchCount: conf.Batch.MaxBatchCount,
+		Concurrency:   conf.Batch.Concurrency,
+		Handler:       c.handleSendGetRecords,
+	})
+	c.putBatchCtrl = batchjob.NewBatchController(context.Background(), batchjob.CtrlConfig{
+		Label:         "RecordPutter",
+		QueueSize:     conf.Batch.QueueSize,
+		WaitTime:      conf.Batch.WaitTime,
+		MaxBatchCount: conf.Batch.MaxBatchCount,
+		Concurrency:   conf.Batch.Concurrency,
+		Handler:       c.handleSendPutRecords,
+	})
 	return nil
 }
 
@@ -196,16 +227,16 @@ func (c *LeaderHealthChecker) becomeFollower(e store.LeaderChangeEvent, leaderVe
 	}
 	remoteLeader := NewRemotePeerFunc()
 	remoteLeader.Initialize(*c.conf)
-	if err := remoteLeader.Serve(context.Background(), e.LeaderHost, uint32(utils.LocalPort)); err != nil {
+	if err := remoteLeader.Serve(context.Background(), c, e.LeaderHost, uint32(utils.LocalPort)); err != nil {
 		plog.Error("[HealthCheck][Leader] follower run serve, do retry", zap.Error(err))
 		go func(e store.LeaderChangeEvent, leaderVersion int64) {
 			time.Sleep(time.Second)
+			c.lock.Lock()
+			defer c.lock.Unlock()
 			curVersion := atomic.LoadInt64(&c.leaderVersion)
 			if leaderVersion != curVersion {
 				return
 			}
-			c.lock.Lock()
-			defer c.lock.Unlock()
 			c.becomeFollower(e, leaderVersion)
 		}(e, leaderVersion)
 		return
@@ -228,7 +259,11 @@ func (c *LeaderHealthChecker) Type() plugin.HealthCheckType {
 }
 
 // Report process heartbeat info report
-func (c *LeaderHealthChecker) Report(request *plugin.ReportRequest) error {
+func (c *LeaderHealthChecker) Report(ctx context.Context, request *plugin.ReportRequest) error {
+	if isSendFromPeer(ctx) {
+		return ErrorRedirectOnlyOnce
+	}
+
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 	if !c.isInitialize() {
@@ -255,7 +290,7 @@ func (c *LeaderHealthChecker) Report(request *plugin.ReportRequest) error {
 
 // Check process the instance check
 func (c *LeaderHealthChecker) Check(request *plugin.CheckRequest) (*plugin.CheckResponse, error) {
-	queryResp, err := c.Query(&request.QueryRequest)
+	queryResp, err := c.Query(context.Background(), &request.QueryRequest)
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +334,11 @@ func (c *LeaderHealthChecker) Check(request *plugin.CheckRequest) (*plugin.Check
 }
 
 // Query queries the heartbeat time
-func (c *LeaderHealthChecker) Query(request *plugin.QueryRequest) (*plugin.QueryResponse, error) {
+func (c *LeaderHealthChecker) Query(ctx context.Context, request *plugin.QueryRequest) (*plugin.QueryResponse, error) {
+	if isSendFromPeer(ctx) {
+		return nil, ErrorRedirectOnlyOnce
+	}
+
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 	if !c.isInitialize() {
@@ -337,7 +376,10 @@ func (c *LeaderHealthChecker) RemoveFromCheck(request *plugin.AddCheckRequest) e
 }
 
 // Delete delete record by key
-func (c *LeaderHealthChecker) Delete(key string) error {
+func (c *LeaderHealthChecker) Delete(ctx context.Context, key string) error {
+	if isSendFromPeer(ctx) {
+		return ErrorRedirectOnlyOnce
+	}
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 	responsible := c.findLeaderPeer()
@@ -421,4 +463,93 @@ func (c *LeaderHealthChecker) DebugHandlers() []plugin.DebugHandler {
 			Handler: handleDescribeBeatCache(c),
 		},
 	}
+}
+
+func (c *LeaderHealthChecker) handleSendGetRecords(futures []batchjob.Future) {
+	peers := make(map[string]*PeerReadTask)
+	for i := range futures {
+		taskInfo := futures[i].Param()
+		task := taskInfo.(*PeerTask)
+		peer := task.Peer
+		if peer.isClose() {
+			_ = futures[i].Reply(nil, ErrorPeerClosed)
+			continue
+		}
+		if _, ok := peers[peer.Host()]; !ok {
+			peers[peer.Host()] = &PeerReadTask{
+				Peer:    peer,
+				Keys:    make([]string, 0, 16),
+				Futures: make(map[string][]batchjob.Future),
+			}
+		}
+		key := task.Key
+		peers[peer.Host()].Keys = append(peers[peer.Host()].Keys, key)
+		if _, ok := peers[peer.Host()].Futures[key]; !ok {
+			peers[peer.Host()].Futures[key] = make([]batchjob.Future, 0, 4)
+		}
+		peers[peer.Host()].Futures[key] = append(peers[peer.Host()].Futures[key], futures[i])
+	}
+
+	for i := range peers {
+		peer := peers[i].Peer
+		keys := peers[i].Keys
+		peerfutures := peers[i].Futures
+		resp := peer.Cache.Get(keys...)
+		for key := range resp {
+			fs := peerfutures[key]
+			for _, f := range fs {
+				_ = f.Reply(map[string]*ReadBeatRecord{
+					key: resp[key],
+				}, nil)
+			}
+		}
+	}
+	for i := range futures {
+		_ = futures[i].Reply(nil, ErrorRecordNotFound)
+	}
+}
+
+func (c *LeaderHealthChecker) handleSendPutRecords(futures []batchjob.Future) {
+	peers := make(map[string]*PeerWriteTask)
+	for i := range futures {
+		taskInfo := futures[i].Param()
+		task := taskInfo.(*PeerTask)
+		peer := task.Peer
+		if peer.isClose() {
+			_ = futures[i].Reply(nil, ErrorPeerClosed)
+			continue
+		}
+		if _, ok := peers[peer.Host()]; !ok {
+			peers[peer.Host()] = &PeerWriteTask{
+				Peer:    peer,
+				Records: make([]WriteBeatRecord, 0, 16),
+				Futures: make([]batchjob.Future, 0, 16),
+			}
+		}
+		peers[peer.Host()].Records = append(peers[peer.Host()].Records, *task.Record)
+		peers[peer.Host()].Futures = append(peers[peer.Host()].Futures, futures[i])
+	}
+
+	for i := range peers {
+		peer := peers[i].Peer
+		peer.Cache.Put(peers[i].Records...)
+	}
+	for i := range futures {
+		_ = futures[i].Reply(struct{}{}, nil)
+	}
+}
+
+func isSendFromPeer(ctx context.Context) bool {
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if _, exist := md[sendResource]; exist {
+			return true
+		}
+	}
+	return false
+}
+
+type PeerTask struct {
+	Peer   *RemotePeer
+	Key    string
+	Record *WriteBeatRecord
 }

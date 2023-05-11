@@ -243,7 +243,7 @@ func (s *Server) GetLastHeartbeat(req *apiservice.Instance) *apiservice.Response
 	if !ok {
 		return api.NewInstanceResponse(apimodel.Code_HeartbeatTypeNotFound, req)
 	}
-	queryResp, err := checker.Query(&plugin.QueryRequest{
+	queryResp, err := checker.Query(context.Background(), &plugin.QueryRequest{
 		InstanceId: insCache.ID(),
 		Host:       insCache.Host(),
 		Port:       insCache.Port(),
@@ -282,7 +282,7 @@ func (s *Server) handleInstanceEventWorker(ctx context.Context) {
 					break
 				}
 				log.Infof("[Health Check]delete instance heart beat information, id is %s", event.Id)
-				err := checker.Delete(event.Id)
+				err := checker.Delete(ctx, event.Id)
 				if err != nil {
 					log.Errorf("[Health Check]addr is %s:%d, id is %s, delete err is %s",
 						insCache.Host(), insCache.Port(), insCache.ID(), err)

@@ -19,6 +19,7 @@ package batchjob
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"time"
 )
@@ -30,7 +31,7 @@ type Future interface {
 	Done() (interface{}, error)
 	DoneTimeout(timeout time.Duration) (interface{}, error)
 	Cancel()
-	Reply(result interface{}, err error)
+	Reply(result interface{}, err error) error
 }
 
 type errorFuture struct {
@@ -53,8 +54,8 @@ func (f *errorFuture) DoneTimeout(timeout time.Duration) (interface{}, error) {
 func (f *errorFuture) Cancel() {
 }
 
-func (f *errorFuture) Reply(result interface{}, err error) {
-
+func (f *errorFuture) Reply(result interface{}, err error) error {
+	return nil
 }
 
 type future struct {
@@ -72,25 +73,29 @@ func (f *future) Param() Param {
 }
 
 func (f *future) Done() (interface{}, error) {
+	defer func() {
+		f.Cancel()
+	}()
 	select {
 	case <-f.ctx.Done():
 		return nil, f.ctx.Err()
 	case <-f.setsignal:
-		f.cancel()
 		return f.result, f.err
 	}
 }
 
 func (f *future) DoneTimeout(timeout time.Duration) (interface{}, error) {
 	timer := time.NewTimer(timeout)
-	defer timer.Stop()
+	defer func() {
+		timer.Stop()
+		f.Cancel()
+	}()
 	select {
 	case <-timer.C:
 		return nil, context.DeadlineExceeded
 	case <-f.ctx.Done():
 		return nil, f.ctx.Err()
 	case <-f.setsignal:
-		f.cancel()
 		return f.result, f.err
 	}
 }
@@ -102,12 +107,17 @@ func (f *future) Cancel() {
 	f.cancel()
 }
 
-func (f *future) Reply(result interface{}, err error) {
+var (
+	ErrorReplyOnlyOnce = errors.New("reply only call once")
+)
+
+func (f *future) Reply(result interface{}, err error) error {
 	if !atomic.CompareAndSwapInt32(&f.replied, 0, 1) {
-		return
+		return ErrorReplyOnlyOnce
 	}
 	f.result = result
 	f.err = err
 	f.setsignal <- struct{}{}
 	close(f.setsignal)
+	return nil
 }
