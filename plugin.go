@@ -18,7 +18,6 @@
 package main
 
 import (
-	_ "github.com/polaris-contrib/nacosserver"
 	_ "github.com/polarismesh/polaris/apiserver/eurekaserver"
 	_ "github.com/polarismesh/polaris/apiserver/grpcserver/config"
 	_ "github.com/polarismesh/polaris/apiserver/grpcserver/discover"
@@ -42,4 +41,5 @@ import (
 	_ "github.com/polarismesh/polaris/plugin/whitelist"
 	_ "github.com/polarismesh/polaris/store/boltdb"
 	_ "github.com/polarismesh/polaris/store/mysql"
+	_ "github.com/pole-group/nacosserver"
 )
