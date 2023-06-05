@@ -68,8 +68,8 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/client_model v0.4.0 // indirect
-	github.com/prometheus/common v0.43.0 // indirect
-	github.com/prometheus/procfs v0.9.0 // indirect
+	github.com/prometheus/common v0.44.0 // indirect
+	github.com/prometheus/procfs v0.10.1 // indirect
 	github.com/smartystreets/assertions v1.0.1 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	go.uber.org/goleak v1.1.12 // indirect
@@ -81,10 +81,16 @@ require (
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.0
-	github.com/polarismesh/specification v1.3.0
-	github.com/pole-group/nacosserver v0.0.0-20230514114209-d87c7aff1afd
+	github.com/agiledragon/gomonkey/v2 v2.10.1
+	github.com/polarismesh/specification v1.3.2-alpha.4
+	github.com/pole-group/nacosserver v0.0.0-20230603044250-14e12b7f6d66
 )
 
-require google.golang.org/genproto v0.0.0-20230410155749-daa745c078e1 // indirect
+require (
+	google.golang.org/genproto/googleapis/api v0.0.0-20230525234020-1aefcd67740a // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20230530153820-e85fd2cbaebc // indirect
+)
 
 replace gopkg.in/yaml.v2 => gopkg.in/yaml.v2 v2.2.2
+
+replace github.com/pole-group/nacosserver => /data/Github/nacosserver
